@@ -1,0 +1,35 @@
+---
+title: "Setting up requirements and packages"
+author: "Al Xin"
+date: "2025-09-07"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, eval = FALSE)
+```
+
+## Loading from `renv`
+
+We manage the packages and versions in this project with `renv`. Currently, `renv` is configured to work with R version 4.4.2. Some of the included packages were built with later versions of R, but they should still work within the project. To load all the dependencies, run the following:
+
+```{r}
+if (!require("renv")) install.packages("renv")
+renv::restore()
+```
+
+More information about `renv` can be found in its [documentation](https://rstudio.github.io/renv/articles/renv.html).
+
+## Downloading from source
+
+If `renv::restore()` fails to install `fastFMM`, it may be necessary to download them separately. We built these figures with the development version of `fastFMM`, available on GitHub at the repository [awqx/fastFMM](https://github.com/awqx/fastFMM). 
+
+```{r}
+if (!require("devtools")) install.packages("devtools")
+suppressMessages(
+  devtools::install_github("awqx/fastFMM")
+)
+```
+
+
+

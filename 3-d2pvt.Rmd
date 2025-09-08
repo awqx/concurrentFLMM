@@ -1,0 +1,68 @@
+---
+title: 'Figure 3: Variable trial lengths in D2+ PVT mice experiments'
+author: "Al Xin"
+date: "2025-08-15"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+suppressMessages(library(dplyr))
+```
+
+## Overview
+
+## Data processing
+
+Below, the code demonstrates how to convert the raw dataset into a more easily readable data frame. For example, we relabeled the column names from `X.[Timepoint 1], X.[Timepoint 2], ...`, where the `Timepoint n` is given in seconds, to `photometry_1, photometry_2, ...`. We also converted the scalar value of latency (`latency`) to the functional covariate of whether the mouse has been rewarded (`reward`), aligning the latency to the original timepoints. 
+**Note**: The raw data is currently not published on GitHub, so the below code will not work out of the box. 
+
+```{r read raw data}
+df <- read.csv("data-raw/3-d2pvt/D2PVT_FLMM_input_HSMSvsHH2O.csv") %>%
+  select(-Trial_no) # deprecated trial number coding
+
+# Remove "X."
+times <- as.numeric(gsub("^X(\\.)*", "", colnames(df)[7:ncol(df)]))
+# Convert to negative
+times[1:24] <- -times[1:24]
+
+colnames(df) <- c(
+  "id", 
+  "session", 
+  "outcome",
+  "latency", 
+  "trial",
+  paste0("photometry_", 1:(ncol(df) - 5))
+)
+
+# Convert session from character to numeric
+df$session <- as.numeric(gsub("^S", "", df$session))
+
+# Clean up ID by removing the date and L#
+# There should only be 5 different mice
+df$id <- gsub("^[[:digit:]]{8}\\_", "", df$id)
+df$id <- gsub("\\_L[[:digit:]]+$", "", df$id)
+
+# Make outcome a factor 
+df$outcome <- as.factor(df$outcome)
+# Scale trial
+# df$trial <- as.numeric(scale(df$trial))
+
+latencies <- df$latency
+approaching <- do.call(
+  rbind, 
+  lapply(
+    latencies, 
+    function(x)
+      as.numeric(times < x)
+  )
+)
+approaching <- data.frame(approaching)
+colnames(approaching) <- paste0("approaching_", 1:length(times))
+
+# Return data frame of photometry and functional covariate `approaching`
+df <- cbind(df, approaching)
+```
+
+
+

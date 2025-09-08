@@ -1,0 +1,567 @@
+---
+title: 'Figure 1: Visualization of an example concurrent functional linear mixed
+  model.'
+author: "Al W Xin"
+output:
+  pdf_document: default
+---
+
+## Overview
+
+We continued an analysis of a dataset found in the preceding publication, illustrating how concurrent models produced by `fastFMM` might produce more reliable coefficient estimates. 
+
+## Directory setup and function loading
+
+We require the following packages to organize and plot data. 
+
+```{r}
+suppressMessages(library(dplyr))
+suppressMessages(library(ggplot2))
+theme_set(theme_bw())
+```
+
+We saved the helper functions in the directory `fun/`. 
+
+```{r}
+# Plotting tidyverse-compatible data
+source("fun/plottable_fmm.R")
+```
+
+File outputs will be saved in `img/2-lick`. 
+
+```{r mkdir}
+img_dir <- paste0("img/2-lick")
+if (!dir.exists(img_dir)) {
+  dir.create(img_dir)
+}
+```
+
+## Data
+
+Relatedly, a subsampled version of this dataset is available within the `fastFMM` package as `fastFMM::lick`. 
+
+We can source the previous cleaning functions we developed.
+
+```{r}
+source("fun/jeong_3.R")
+source("fun/time_align.R")
+```
+
+The two different parameters for `lick_prob` are stored in JSONs in `data/cleaning`. 
+
+```{r}
+pp <- jsonlite::read_json(
+  paste0(params_dir, "jeong_3-reward-", pre_rwd_len, ".json"), 
+  simplifyVector = T
+)
+
+class(pp) <- pp$align_to
+```
+
+```{r}
+ids <- c(
+  'HJ-FP-M2',
+  'HJ-FP-M3',
+  'HJ-FP-M4',
+  'HJ-FP-F1',
+  'HJ-FP-F2',
+  'HJ-FP-M6',
+  'HJ-FP-M7',
+  'HJ-FP-M8'
+)
+
+session_min <- pp$session_min
+session_max <- pp$session_max
+
+iri_cutoff <- 5
+```
+
+## Different reward periods
+
+### Compiling data
+
+```{r, eval = F}
+silent <- T
+
+reward_list <- mapply(
+  function(id, s) {
+    f_name <- paste0(raw_dir, "sub-", id, "_ses-Day", s, ".nwb")
+    # Check for file existence and return early if not found
+    if (!file.exists(f_name)) return()
+    
+    # Read and align ttls and photometry data
+    dat <- read_matlab(f_name)
+    
+    # Stop function if IRI is too low
+    iri_length <- mean(
+      diff(dat$ttls$time[dat$ttls$event == pp$label_rwd])
+    )
+    
+    if (!silent)
+      message(id, s, " mean(IRI): ", round(mean(iri_length), 2), "s.")
+    if (iri_length < iri_cutoff)
+      return()
+    
+    # Filter trials
+    keepers <- filter_trials(pp, dat)
+    if (sum(keepers) < 1)
+      return()
+    
+    # Align trials and label the photometry data
+    trial_idx <- index_trials(pp, dat, keepers, downsample = T)
+    photo_df <- apply(trial_idx, 1, function(x) dat$dat_photo$data[x]) %>%
+      as.data.frame()
+    colnames(photo_df) <- paste0("photometry_", 1:ncol(photo_df))
+    
+    # Get the functional covariate of lick
+    downsample_by <- round(pp$Hz / pp$target_Hz)
+    lick_df <- get_lick_fun(pp, dat, trial_idx, downsample_by)
+    colnames(lick_df) <- paste0("lick_", 1:ncol(photo_df))
+    
+    # Get IRI
+    iri <- c(
+      dat$ttls$time[dat$ttls$event == pp$label_rwd][1],  
+      diff(dat$ttls$time[dat$ttls$event == pp$label_rwd]) 
+    )
+    # Get lick times, totals, and probability
+    sess_info <- data.frame(
+      id = id, 
+      session = s, 
+      trial = (1:length(keepers))[keepers], 
+      lick_time = get_lick_time(pp, dat)[keepers], 
+      lick_prob_050 = get_lick_prob(pp, dat, T, 0.5)[keepers], 
+      lick_prob_100 = get_lick_prob(pp, dat, T, 1.0)[keepers], 
+      lick_prob_150 = get_lick_prob(pp, dat, T, 1.5)[keepers],
+      lick_prob_200 = get_lick_prob(pp, dat, T, 2.0)[keepers],
+      # lick_I_050 = get_lick_I(pp, dat, 0.5)[keepers], 
+      # lick_I_100 = get_lick_I(pp, dat, 1.0)[keepers], 
+      # lick_I_150 = get_lick_I(pp, dat, 1.5)[keepers],
+      # lick_I_200 = get_lick_I(pp, dat, 2.0)[keepers],
+      licks = get_lick_total(pp, dat)[keepers], 
+      iri = iri[keepers]
+    )
+    
+    return(cbind(sess_info, photo_df, lick_df))
+  }, 
+  rep(ids, session_max - session_min + 1), 
+  rep(session_min:session_max, each = length(ids))
+)
+
+reward <- do.call(rbind, reward_list)
+rm(reward_list)
+```
+
+To save time, we can save and reload the `reward` data from a CSV.
+
+```{r save and read csv}
+rwd_fname <- paste0(proc_dir, "reward-", pre_rwd_len, ".csv")
+if (!file.exists(rwd_fname))
+  write.csv(reward, rwd_fname, row.names = F)
+reward <- read.csv(rwd_fname)
+```
+
+### Fitting FUI models
+
+```{r, eval = F}
+reward <- reward[rowSums(is.na(reward)) == 0, ]
+reward_scaled <- reward %>%
+  mutate(
+    session = (session - 1) / max(session), 
+    trial = (trial - 1) / max(trial)
+  ) 
+
+make_fui_model <- function(covariate, data, concurrent) {
+  form_temp <- paste0(
+    "photometry ~ session + trial + ", covariate, 
+    " + (1 + ", covariate, " | id)"
+  )
+  fastFMMconc::fui(
+    formula = as.formula(form_temp), 
+    data = data, 
+    concurrent = concurrent, 
+    silent = T
+  )
+}
+
+lick_fun <- make_fui_model(
+  covariate = "lick", 
+  data = select(reward_scaled, -lick_time:-licks), 
+  concurrent = T
+)
+
+# List of lick probability models
+lick_probs_names <- paste0("lick_prob_", c("050", "100", "150", "200"))
+lick_probs <- lapply(
+  lick_probs_names, 
+  make_fui_model, 
+  data = reward_scaled, 
+  concurrent = F
+)
+names(lick_probs) <- lick_probs_names
+```
+
+```{r}
+fui_fname <- paste0(res_dir, "lick_probs-", pre_rwd_len, ".RDS")
+if (!file.exists(fui_fname))
+  saveRDS(lick_probs, fui_fname)
+lick_probs <- readRDS(fui_fname)
+```
+
+## Plotting
+
+### With default fastFMMconc functionality
+
+To easily look at the covariate, `fastFMMconc::plot_fui` works out of the box.
+
+```{r}
+# dummy <- fastFMMconc::plot_fui(lick_fun, align_x = 0.4, x_rescale = 25)
+dummy <- lapply(
+  lick_probs, 
+  fastFMMconc::plot_fui, 
+  align_x = 0.4, 
+  x_rescale = 25
+)
+```
+
+The following saves the plots as PNGs.
+
+```{r}
+for (fname in lick_probs_names) {
+  png(filename = paste0(img_dir, fname, ".png"), width = 600, height = 400)
+  fastFMMconc::plot_fui(lick_probs[[fname]], align_x = 0.4, x_rescale = 25)
+  dev.off()
+}
+
+png(filename = paste0(img_dir, "lick_fun.png"), width = 600, height = 400)
+fastFMMconc::plot_fui(lick_fun, align_x = 0.4, x_rescale = 25)
+dev.off()
+```
+
+### Plotting with `ggplot2`
+
+```{r}
+source("fun/plottable_fmm.R")
+
+lick_plots <- lapply(
+  names(lick_probs), 
+  function(x) {
+    plottable_fmm(
+      lick_probs[[x]], 
+      cov_names = c("Intercept", "Trial", "Session", "Lick")
+    ) %>%
+      filter(cov == "Lick") %>% 
+      select(-cov) %>%
+      mutate(s = s / 25 - 0.4) %>%
+      mutate(model = x)
+  }
+)
+
+lick_plots[["lick"]] <- plottable_fmm(
+  lick_fun, 
+  cov_names = c("Intercept", "Trial", "Session", "Lick")
+) %>%
+  filter(cov == "Lick") %>% 
+  select(-cov) %>%
+  mutate(s = s / 25 - 0.4) %>%
+  mutate(model = "lick")
+
+lick_plottable <- do.call(rbind, lick_plots)
+```
+
+Saving the plottable CSV is also useful. 
+
+```{r}
+plottable_fname <- paste0(res_dir, "lick_plottable-", pre_rwd_len, ".csv")
+if (!file.exists(plottable_fname)) 
+  write.csv(lick_plottable, plottable_fname, row.names = F)
+lick_plottable <- read.csv(plottable_fname)
+```
+
+Plotting proceeds as follows: 
+
+```{r}
+model_names <- list(
+  "lick" = "Lick (concurrent)", 
+  "lick_prob_050" = "Lick rate, T = 0.5 s", 
+  "lick_prob_100" = "Lick rate, T = 1.0 s", 
+  "lick_prob_150" = "Lick rate, T = 1.5 s", 
+  "lick_prob_200" = "Lick rate, T = 2.0 s"
+)
+
+model_labeller <- function(variable, value){
+  return(model_names[value])
+}
+
+model_incl <- c(
+  "lick", 
+  "lick_prob_050", 
+  "lick_prob_100", 
+  "lick_prob_200"
+)
+
+lick_labs <- data.frame(
+  label = c("i", "ii", "iii", "iv"),
+  model = model_incl) %>%
+  mutate(model = factor(model, levels = model_incl))
+
+ggplot(
+  lick_plottable %>% filter(model %in% model_incl), 
+  aes(x = s, y = val)
+) + 
+  facet_wrap(
+    facets = vars(model), 
+    nrow = 4,
+    scales = "free_y", 
+    labeller = model_labeller
+  ) + 
+  geom_line() + 
+  geom_ribbon(aes(ymin = val - ci, ymax = val + ci), alpha = 0.2) + 
+  geom_ribbon(aes(ymin = val - joint_ci, ymax = val + joint_ci), alpha = 0.2) + 
+  geom_hline(yintercept = 0, linetype = "dotted") + 
+  geom_vline(xintercept = 0, linetype = "dotted") + 
+  # geom_text(
+  #   data = lick_labs, 
+  #   mapping = aes(
+  #     x = -Inf, 
+  #     y = Inf, 
+  #     hjust   = -0.7,
+  #     vjust   = 1.4,
+  #     label = label
+  #     ), 
+  #   size = 4.5, 
+  #   color = elife_lightblue
+  # ) + 
+  labs(
+    x = "Time from reward (s)", 
+    y = "Fixed coefficient"
+  ) + 
+  theme(
+    panel.border = element_blank(), 
+    panel.grid.minor = element_blank()
+  )
+
+ggsave(paste0(img_dir, "lick_vs_prob.png"), width = 4, height = 7)
+```
+
+### All covariates
+
+```{r}
+source("fun/plottable_fmm.R")
+lr_names <- paste0("ncFLMM, T = ", c(0.5, 1.0, 1.5, 2.0))
+lick_plots_all <- lapply(
+  1:length(lr_names), 
+  function(x) {
+    plottable_fmm(
+      lick_probs[[x]], 
+      cov_names = c("Intercept", "Trial", "Session", "Lick")
+    ) %>%
+      mutate(s = s / 25 - 0.4) %>%
+      mutate(model = lr_names[x])
+  }
+)
+
+lick_plots_all[["cFLMM"]] <- plottable_fmm(
+  lick_fun, 
+  cov_names = c("Intercept", "Trial", "Session", "Lick")
+) %>%
+  mutate(s = s / 25 - 0.4) %>%
+  mutate(model = "cFLMM")
+
+lick_plottable <- do.call(rbind, lick_plots_all) %>%
+  rename(cov_name = cov)
+```
+
+```{r}
+model_incl <- c("cFLMM", lr_names[-3])
+ggplot(
+  lick_plottable %>% 
+    filter(model %in% model_incl) %>%
+    mutate(nm = paste0(model, " ", cov_name))
+  , 
+  aes(x = s, y = val)
+) + 
+  # facet_grid(
+  #   rows = vars(model), 
+  #   cols = vars(cov_name), 
+  #   scales = "free_y", 
+  # ) + 
+  facet_wrap(
+    facets = vars(nm),
+    nrow = 4, 
+    scales = "free_y", 
+    axis.labels = "margins"
+  ) + 
+  geom_line() + 
+  geom_ribbon(aes(ymin = val - ci, ymax = val + ci), alpha = 0.2) + 
+  geom_ribbon(aes(ymin = val - joint_ci, ymax = val + joint_ci), alpha = 0.2) + 
+  geom_hline(yintercept = 0, linetype = "dotted") + 
+  geom_vline(xintercept = 0, linetype = "dotted") + 
+  labs(
+    x = "Time from reward (s)", 
+    y = "Fixed coefficient"
+  ) + 
+  theme_void() + 
+  theme(
+    panel.border = element_blank(), 
+    panel.grid.minor = element_blank(), 
+    axis.text.x = element_blank(), 
+    strip.background = element_blank(),
+    strip.text.x = element_blank()
+  )
+
+ggsave(paste0(img_dir, "lick_all_coefs.png"), width = 7, height = 6)
+```
+
+
+## Probability of a lick
+
+### Marginalized over trial and ID
+
+```{r}
+lick_df <- reward_scaled %>%
+  select(lick_1:lick_72)
+lick_p <- data.frame(
+  lick_prob = colMeans(lick_df), 
+  s = 1:ncol(lick_df)
+) %>% 
+  mutate(
+    time = s / 25 - 0.4
+  )
+
+ggplot(lick_p, aes(x = time, y = lick_prob)) + 
+  geom_line() + 
+  geom_vline(xintercept = 0, linetype = "dotted") + 
+  labs(
+    y = "Marginal lick probability", 
+    x = "Time from reward delivery (s)"
+  )
+
+ggsave(paste0(img_dir, "lick_p_marginal.png"), width = 4, height = 3)
+```
+
+### Grouped by ID
+
+```{r}
+library(data.table)
+
+lick_dt <- reward_scaled %>%
+  select(lick_1:lick_72, id) %>% 
+  setDT()
+
+# Kind of a bad workaround since it creates many new rows
+lick_p_id <- lick_dt[
+  , 
+  paste0('p_', names(lick_dt)[1:72]) := lapply(.SD, mean), 
+  by = id, 
+  .SDcols = 1:72
+] %>%
+  select(-lick_1:-lick_72) %>%
+  unique() %>%
+  tidyr::pivot_longer(
+    p_lick_1:p_lick_72, 
+    names_to = "s", 
+    values_to = "p_lick"
+  ) %>%
+  mutate(
+    s = rep(1:72, length(unique(id)))
+  )
+
+ggplot(lick_p_id, aes(x = s, y = p_lick, color = id)) + 
+  geom_line() + 
+  geom_vline(xintercept = 0, linetype = "dotted") + 
+  labs(
+    y = "Marginal lick probability", 
+    x = "Time from reward delivery (s)", 
+    color = NULL
+  ) + 
+  theme(legend.position = "none")
+
+ggsave(paste0(img_dir, "lick_p_id_unsmooth.png"), width = 4, height = 3)
+```
+
+Smooth it for clarity.
+
+```{r}
+L <- 72
+smooth_list <- lapply(
+  unique(lick_p_id$id), 
+  function(i) {
+    dat <- lick_p_id[lick_p_id$id == i, ]
+    temp <- stats::smooth.spline(
+      x = dat$s, 
+      y = dat$p_lick, 
+      nknots = round(L / 8)
+    )
+    data.frame(
+      s = 1:L, 
+      p_lick = temp$y, 
+      id = i
+    )
+  }
+)
+
+lick_p_id_smooth <- do.call(rbind, smooth_list) %>%
+  mutate(
+    time = s / 25 - 0.4
+  )
+
+ggplot(lick_p_id_smooth, aes(x = time, y = p_lick, color = id)) + 
+  geom_line() + 
+  geom_vline(xintercept = 0, linetype = "dotted") + 
+  labs(
+    y = "Smoothed lick probability", 
+    x = "Time from reward delivery (s)", 
+    color = NULL
+  ) + 
+  theme(legend.position = "none")
+
+ggsave(paste0(img_dir, "lick_p_id.png"), width = 4, height = 3.5)
+```
+
+## Marginal photometry data
+
+Repeat ID marginalization, but now with the photometry data. 
+
+```{r}
+library(data.table)
+L <- 72
+
+photometry_dt <- reward_scaled %>%
+  select(photometry_1:photometry_72, id) %>% 
+  setDT()
+
+# Kind of a bad workaround since it creates many new rows
+photometry_p_id <- photometry_dt[
+  , 
+  paste0('p_', names(photometry_dt)[1:L]) := lapply(.SD, mean), 
+  by = id, 
+  .SDcols = 1:L
+] %>%
+  select(-photometry_1:-photometry_72) %>%
+  unique() %>%
+  tidyr::pivot_longer(
+    p_photometry_1:p_photometry_72, 
+    names_to = "s", 
+    values_to = "p_photometry"
+  ) %>%
+  mutate(
+    s = rep(1:L, length(unique(id)))
+  ) %>%
+  mutate(
+    time = s / 25 - 0.4
+  )
+
+ggplot(photometry_p_id, aes(x = time, y = p_photometry, color = id)) + 
+  geom_line() + 
+  geom_vline(xintercept = 0, linetype = "dotted") + 
+  labs(
+    y = "Average photometry signal", 
+    x = "Time from reward delivery (s)", 
+    color = NULL
+  ) + 
+  theme(legend.position = "none")
+
+ggsave(paste0(img_dir, "photometry_id.png"), width = 4, height = 3.5)
+```
+
+
