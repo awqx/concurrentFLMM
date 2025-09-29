@@ -33,7 +33,7 @@ source("fun/synthesize_data.R")
 File outputs will be saved in `img/1-cflmm`. 
 
 ```{r mkdir}
-img_dir <- paste0("img/1-cflmm")
+img_dir <- paste0("img/1-cflmm/")
 if (!dir.exists(img_dir)) {
   dir.create(img_dir)
 }
@@ -41,32 +41,14 @@ if (!dir.exists(img_dir)) {
 
 ## Synthetic data
 
-Model-building will be demonstrated on synthetic data without a random slope. 
+Model-building will be demonstrated on synthetic data without a random slope. The procedure for generating the data can be found in `data-raw/1-cflmm.R`.
+
+```{r}
+dat <- read.csv("data/1-cflmm.csv")
+```
 
 The choice of number of clusters and number of replicates is arbitrary. For the figure, the point `s_pt` is also motivated by aesthetic choice and not experimental significance.
 
-```{r}
-# S comes from the synthetic data function
-L <- length(S)
-s_pt <- S[25]
-
-set.seed(20250605)
-dat_list <- synthesize_data(
-  I = 40, 
-  J = 50, 
-  snr_B = 0.5, 
-  snr_sigma = 0.5,
-  ptwise_snr = T,
-  y_name = "y", 
-  x_name = "x", 
-  return_fixed = T, 
-  return_noise = T,
-  asis_cols = F, 
-  fix_J = T
-)
-
-dat <- dat_list$data
-```
 
 ### Graphing a single example replicate
 
@@ -151,7 +133,6 @@ mod <- fastFMM::fui(
   concurrent = T, 
   randeffs = T
 )
-# fastFMMconc::plot_fui(mod)  
 ```
 
 ```{r}
