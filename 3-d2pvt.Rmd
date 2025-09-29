@@ -12,6 +12,8 @@ suppressMessages(library(dplyr))
 
 ## Overview
 
+In this figure, we use an interaction model to capture instantaneous effects of a condition in trials with varying lengths.
+
 ## Data processing
 
 Data processing can be found in `data/3-d2pvt.R`. Note that the raw data is currently not published publicly, so the code will not work out of the box. 

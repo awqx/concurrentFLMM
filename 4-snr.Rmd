@@ -7,6 +7,50 @@ output: pdf_document
 
 ## Overview
 
-## Data
+Simulating data is somewhat involved, requiring both the `synthesize_data.R` file, a file containing the known underlying ground truth, and a JSON parameter file relating the two. These in turn are fed into `syn.R`, which actually runs the simulations and produces the results. 
 
-## 
+For space-saving reasons, the outputs from `syn` are not included in the repo. Thus, the below are not directly runnable. 
+
+```{r}
+img_dir <- "img/4-snr/"
+```
+
+## Graphs
+
+The below is currently incorrect, as the eLife paper figures use a different set of cluster numbers.
+
+```{r}
+joint <- read.csv("data/4-snr-joint.csv")
+
+joint_long <- joint %>%
+  tidyr::pivot_longer(
+    beta_CI_joint:beta_CI_naive_noIntrcpt, 
+    names_to = "nm", 
+    values_to = "coverage"
+  ) %>%
+  mutate(
+    intrcpt = ifelse(grepl("noIntrcpt", nm), "No intrcpt", "W/ intrcpt"), 
+    ptwise = ifelse(grepl("joint", nm), "Joint", "Ptwise"), 
+    snr_B = as.factor(snr_B), 
+    snr_sigma = as.factor(snr_sigma)
+  )
+
+joint_long %>%
+  # filter(ptwise == "Ptwise") %>%
+  ggplot(aes(x = n_ids, y = coverage)) + 
+    geom_line(aes(linetype = intrcpt, color = ptwise)) + 
+    geom_hline(
+      yintercept = 0.95, 
+      color = palette.colors(5)[5], 
+      linetype = "dotted"
+    ) +
+    facet_grid(cols = vars(snr_sigma), rows = vars(snr_B)) + 
+    scale_color_manual(values = palette.colors(3)[-1]) +
+    labs(
+      color = "Coverage", 
+      linetype = "Intercept"
+    ) 
+
+ggsave(paste0(img_dir, "snr_sim.png"), width = 8, height = 7)
+```
+
