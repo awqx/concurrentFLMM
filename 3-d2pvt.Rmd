@@ -14,55 +14,428 @@ suppressMessages(library(dplyr))
 
 ## Data processing
 
-Below, the code demonstrates how to convert the raw dataset into a more easily readable data frame. For example, we relabeled the column names from `X.[Timepoint 1], X.[Timepoint 2], ...`, where the `Timepoint n` is given in seconds, to `photometry_1, photometry_2, ...`. We also converted the scalar value of latency (`latency`) to the functional covariate of whether the mouse has been rewarded (`reward`), aligning the latency to the original timepoints. 
-**Note**: The raw data is currently not published on GitHub, so the below code will not work out of the box. 
+Data processing can be found in `data/3-d2pvt.R`. Note that the raw data is currently not published publicly, so the code will not work out of the box. 
 
-```{r read raw data}
-df <- read.csv("data-raw/3-d2pvt/D2PVT_FLMM_input_HSMSvsHH2O.csv") %>%
-  select(-Trial_no) # deprecated trial number coding
-
-# Remove "X."
-times <- as.numeric(gsub("^X(\\.)*", "", colnames(df)[7:ncol(df)]))
-# Convert to negative
-times[1:24] <- -times[1:24]
-
-colnames(df) <- c(
-  "id", 
-  "session", 
-  "outcome",
-  "latency", 
-  "trial",
-  paste0("photometry_", 1:(ncol(df) - 5))
-)
-
-# Convert session from character to numeric
-df$session <- as.numeric(gsub("^S", "", df$session))
-
-# Clean up ID by removing the date and L#
-# There should only be 5 different mice
-df$id <- gsub("^[[:digit:]]{8}\\_", "", df$id)
-df$id <- gsub("\\_L[[:digit:]]+$", "", df$id)
-
-# Make outcome a factor 
-df$outcome <- as.factor(df$outcome)
-# Scale trial
-# df$trial <- as.numeric(scale(df$trial))
-
-latencies <- df$latency
-approaching <- do.call(
-  rbind, 
-  lapply(
-    latencies, 
-    function(x)
-      as.numeric(times < x)
-  )
-)
-approaching <- data.frame(approaching)
-colnames(approaching) <- paste0("approaching_", 1:length(times))
-
-# Return data frame of photometry and functional covariate `approaching`
-df <- cbind(df, approaching)
+```{r}
+dat <- read.csv("data/3-d2pvt.csv") %>%
+  mutate(outcome = as.factor(outcome)) %>%
+  mutate(outcome = relevel(outcome, ref = "H-H2O"))
 ```
 
+### Model-fitting
+
+The model formula is informed by previous analysis. 
+
+```{r}
+hsms_hh2o_rwd <- fastFMM::fui(
+  photometry ~ outcome * reward + (outcome | id), 
+  dat, 
+  concurrent = T
+)
+```
+
+### Plots
+
+```{r, eval = F}
+png(filename = paste0(img_dir, "hsms_hh2o_rwd.png"), width = 600, height = 400)
+fastFMM::plot_fui(hsms_hh2o_rwd)
+dev.off()
+```
+
+For more flexibility, the plots can also be generated in `ggplot2`. 
+
+```{r}
+source("fun/plottable_fmm.R")
+# mutate s based on zero var col offset
+
+cov_names <- c(
+  "Baseline approach", 
+  "SMS approach", 
+  "Baseline reward", 
+  "SMS reward − baseline reward"
+)
+
+hsms_hh2o_df <- plottable_fmm(
+  hsms_hh2o_rwd, 
+  cov_names = cov_names
+) %>%
+  mutate(s = s + 30)
+
+# Get the correct s offset
+
+# Get times from the original CSV
+hsms_hh2o_orig <- read.csv("data/d2pvt/D2PVT_FLMM_input_HSMSvsHH2O.csv")
+times <- as.numeric(
+  gsub("^X(\\.)*", "", colnames(hsms_hh2o_orig)[7:ncol(hsms_hh2o_orig)])
+)
+# Convert to negative
+times[1:24] <- -times[1:24]
+times_df <- data.frame(s = 1:length(times), time = times)
+
+hsms_hh2o_df <- left_join(hsms_hh2o_df, times_df, by = "s") %>%
+  mutate(cov = factor(cov, cov_names)) 
+
+hsms_hh2o_labs <- data.frame(
+  # label = c("A", "B", "C", "D"), 
+  label = c("i", "ii", "iii", "iv"), 
+  cov = cov_names
+  # x = 1.5, 
+  # y = c(3.5, 5, 2, 4.5)
+) %>%
+  mutate(cov = factor(cov, cov_names))
+
+ggplot(hsms_hh2o_df, aes(x = time, y = val)) + 
+  facet_wrap(vars(cov), nrow = 1, scales = "free_y") + 
+  geom_line() + 
+  geom_ribbon(aes(ymin = val - ci, ymax = val + ci), alpha = 0.2) + 
+  geom_ribbon(aes(ymin = val - joint_ci, ymax = val + joint_ci), alpha = 0.2) + 
+  geom_hline(yintercept = 0, linetype = "dotted") + 
+  labs(
+    x = "Trial time (s)", 
+    y = "Fixed coefficient"
+  ) + 
+  theme(
+    panel.border = element_blank(), 
+    panel.grid.minor = element_blank()
+  )
+
+ggsave(paste0(img_dir, "hsms_hh2o-A.png"), width = 10, height = 2.5)
+```
+
+## Non-concurrent model with latency
+
+
+Instead of `reward`, the non-concurrent equivalent is `latency`. 
+
+```{r}
+hsms_hh2o_lat <- fastFMM::fui(
+  photometry ~ outcome * latency + (outcome | id), 
+  dat, 
+  concurrent = F
+)
+```
+
+### Plots
+
+```{r}
+png(filename = paste0(img_dir, "hsms_hh2o_lat.png"), width = 600, height = 400)
+fastFMM::plot_fui(hsms_hh2o_lat)
+dev.off()
+```
+
+And again in `ggplot2`:
+
+```{r ggplot lat}
+source("fun/plottable_fmm.R")
+# mutate s based on zero var col offset
+
+cov_lat <- c("Baseline", "SMS", "Latency", "SMS * latency")
+
+hsms_hh2o_lat_df <- plottable_fmm(
+  hsms_hh2o_lat, 
+  cov_names = cov_lat
+) # %>%
+#   mutate(s = s + 30)
+
+hsms_hh2o_lat_df <- left_join(hsms_hh2o_lat_df, times_df, by = "s") %>%
+  mutate(cov = factor(cov, cov_lat))
+
+hsms_hh2o_lat_labs <- data.frame(
+  label = c("i", "ii", "iii", "iv"),
+  cov = cov_lat
+) %>%
+  mutate(cov = factor(cov, cov_lat))
+
+ggplot(hsms_hh2o_lat_df, aes(x = time, y = val)) + 
+  facet_wrap(vars(cov), nrow = 1, scales = "free_y") + 
+  geom_line() + 
+  geom_ribbon(aes(ymin = val - ci, ymax = val + ci), alpha = 0.2) + 
+  geom_ribbon(aes(ymin = val - joint_ci, ymax = val + joint_ci), alpha = 0.2) + 
+  geom_hline(yintercept = 0, linetype = "dotted") + 
+  labs(
+    x = "Trial time (s)", 
+    y = "Fixed coefficient"
+  ) + 
+  theme(
+    panel.border = element_blank(), 
+    panel.grid.minor = element_blank()
+  )
+
+ggsave(paste0(img_dir, "hsms_hh2o-B.png"), width = 10, height = 2.5)
+```
+
+## Linear mixed model with average and sum of signal
+
+Instead of a functional linear mixed model, we can fit a linear mixed model. The functional photometry measure is replaced by a scalar of either the average photometry signal in the reward period or the sum.
+
+### Reprocess data
+
+```{r}
+dat <- read.csv(paste0(proc_dir, "hsms_hh2o.csv")) %>%
+  mutate(outcome = as.factor(outcome)) %>%
+  mutate(outcome = relevel(outcome, ref = "H-H2O")) %>%
+  mutate(
+    session = session - 1, 
+    trial = trial - 1, 
+    latency = latency - mean(latency)
+  ) %>%
+  mutate(
+    trial = trial / max(trial), 
+    session = session / max(session)
+  )
+```
+
+The inverse of the `approaching` functional covariate (i.e., `reward`) indicates which photometry signals are relevant. Here, the average of photometry signals in the reward period (`photo_avg`) and the sum in the reward period (`photo_sum`) are reported.
+
+```{r}
+reward_df <- dat[, grep("^approaching", colnames(dat))] %>%
+  as.matrix() 
+reward_df <- abs(reward_df - 1) 
+
+photometry_df <- dat[, grep("^photometry", colnames(dat))] %>%
+  as.matrix()
+
+# photo average
+photo_incl <- photometry_df * reward_df
+dat$photo_avg <- rowSums(photo_incl) / rowSums(reward_df)
+
+# sum of signals over reward
+dat$photo_sum <- rowSums(photo_incl)
+dat$photo_sum <- dat$photo_sum / sd(dat$photo_sum)
+```
+
+### Building LMMs with `lme4::lmer`
+
+```{r}
+lmm_avg <- lme4::lmer(
+  formula = photo_avg ~ outcome * latency + (outcome | id),
+  data = dat,
+  control = lme4::lmerControl(
+    optimizer = "bobyqa",
+    optCtrl = list(maxfun = 5000),
+    check.rankX = "ignore"
+  )
+)
+
+lmm_sum <- lme4::lmer(
+  formula = photo_sum ~ outcome * latency + (outcome | id),
+  data = dat,
+  control = lme4::lmerControl(
+    optimizer = "bobyqa",
+    optCtrl = list(maxfun = 5000),
+    check.rankX = "ignore"
+  )
+)
+```
+
+Dot-whisker plots can be created with `ggplot2`, where "whiskers" are CIs and "boxes" (thicker whiskers) are S.E.
+
+#### Average signal
+
+```{r}
+lmm_avg_outs <- summary(lmm_avg)
+coef_nm <- c(
+  "Intercept", 
+  "SMS", 
+  "Latency", 
+  "SMS * latency"
+)
+
+lmm_avg_ci <- suppressMessages(confint(lmm_avg))
+
+lmm_avg_df <- data.frame(
+  coef_nm = coef_nm, 
+  fixfx = lmm_avg_outs$coefficients[, 1], 
+  sd = lmm_avg_outs$coefficients[, 2], 
+  ci_lo = lmm_avg_ci[5:8, 1], 
+  ci_hi = lmm_avg_ci[5:8, 2]
+) %>%
+  mutate(coef_nm = factor(coef_nm, rev(coef_nm)))
+
+ggplot(lmm_avg_df, aes(x = coef_nm, y = fixfx)) + 
+  geom_point() + 
+  geom_errorbar(aes(ymin = ci_lo, ymax = ci_hi), width = 0) + 
+  geom_errorbar(
+    aes(ymin = fixfx - sd, ymax = fixfx + sd), 
+    width = 0,
+    size = 1
+  ) + 
+  theme(
+    panel.border = element_blank(), 
+    panel.grid.minor = element_blank()
+  ) + 
+  geom_hline(yintercept = 0, linetype = "dotted") + 
+  labs(
+    y = "Fixed effect coefficient", 
+    x = "", 
+    title = "Reward signal average"
+  ) + 
+  coord_flip()
+ggsave(paste0(img_dir, "lmm_avg.png"), width = 5, height = 2.5)
+```
+
+#### Sum of signal
+ 
+```{r}
+lmm_sum_outs <- summary(lmm_sum)
+coef_nm <- c(
+  "Intercept", 
+  "SMS", 
+  "Latency", 
+  "SMS * latency"
+)
+
+lmm_sum_ci <- suppressMessages(confint(lmm_sum))
+
+lmm_sum_df <- data.frame(
+  coef_nm = coef_nm, 
+  fixfx = lmm_sum_outs$coefficients[, 1], 
+  sd = lmm_sum_outs$coefficients[, 2], 
+  ci_lo = lmm_sum_ci[5:8, 1], 
+  ci_hi = lmm_sum_ci[5:8, 2]
+) %>%
+  mutate(coef_nm = factor(coef_nm, rev(coef_nm)))
+
+ggplot(lmm_sum_df, aes(x = coef_nm, y = fixfx)) + 
+  geom_point() + 
+  geom_errorbar(aes(ymin = ci_lo, ymax = ci_hi), width = 0) + 
+  geom_errorbar(
+    aes(ymin = fixfx - sd, ymax = fixfx + sd), 
+    width = 0,
+    size = 1
+  ) + 
+  theme(
+    panel.border = element_blank(), 
+    panel.grid.minor = element_blank()
+  ) + 
+  geom_hline(yintercept = 0, linetype = "dotted") + 
+  labs(
+    y = "Fixed effect coefficient", 
+    x = "", 
+    title = "Reward signal sum"
+  ) + 
+  coord_flip()
+
+ggsave(paste0(img_dir, "lmm_sum.png"), width = 5, height = 2.5)
+```
+ 
+
+```{r}
+ggplot(dat, aes(x = latency, y = photo_avg)) + 
+  geom_point(alpha = 0.2) + 
+  geom_smooth(method = "lm", se = T) + 
+  facet_wrap(vars(outcome)) + 
+  # ylim(c(-10, 10)) + 
+  coord_cartesian(ylim = c(-10, 10))
+
+# ggplot(dat, aes(x = latency, y = photo_max)) + 
+#   geom_point(alpha = 0.2) + 
+#   geom_smooth(method = "lm", se = T)
+```
+
+### Building LMMs with `nlme::lme`
+
+The above models with `lme4::lmer` do not provide p-values. We can recompute models with `nlme::lme`. 
+
+#### Models
+
+```{r}
+lme_avg <- nlme::lme(
+  fixed = photo_avg ~ outcome * latency, 
+  random = ~ outcome | id, 
+  data = dat
+)
+
+lme_sum <- nlme::lme(
+  fixed = photo_sum ~ outcome * latency, 
+  random = ~ outcome | id, 
+  data = dat
+)
+```
+
+#### Plots
+
+Point estimates, standard deviation, and confidence intervals are placed in a plottable data frame. 
+
+```{r}
+coef_nm <- c(
+  "Intercept", 
+  "SMS", 
+  "Latency", 
+  "SMS * latency"
+)
+
+lme_sum_outs <- summary(lme_sum)
+lme_sum_ci <- data.frame(nlme::intervals(lme_sum)$fixed)
+lme_sum_df <- data.frame(
+  coef_nm = coef_nm, 
+  fixfx = lme_sum_outs$coefficients$fixed, 
+  sd = lme_sum_outs$varFix %>% diag() %>% sqrt(), 
+  ci_lo = lme_sum_ci$lower, 
+  ci_hi = lme_sum_ci$upper
+) %>%
+  mutate(coef_nm = factor(coef_nm, rev(coef_nm)))
+
+lme_avg_outs <- summary(lme_avg)
+lme_avg_ci <- data.frame(nlme::intervals(lme_avg)$fixed)
+lme_avg_df <- data.frame(
+  coef_nm = coef_nm, 
+  fixfx = lme_avg_outs$coefficients$fixed, 
+  sd = lme_avg_outs$varFix %>% diag() %>% sqrt(), 
+  ci_lo = lme_avg_ci$lower, 
+  ci_hi = lme_avg_ci$upper
+) %>%
+  mutate(coef_nm = factor(coef_nm, rev(coef_nm)))
+```
+
+Box and whiskers for photometry average: 
+
+```{r}
+ggplot(lme_sum_df, aes(x = coef_nm, y = fixfx)) + 
+  geom_point() + 
+  geom_errorbar(aes(ymin = ci_lo, ymax = ci_hi), width = 0) + 
+  geom_errorbar(
+    aes(ymin = fixfx - sd, ymax = fixfx + sd), 
+    width = 0,
+    linewidth = 1.2
+  ) + 
+  theme(
+    panel.border = element_blank(), 
+    panel.grid.minor = element_blank()
+  ) + 
+  geom_hline(yintercept = 0, linetype = "dotted") + 
+  labs(
+    y = "Fixed effect coefficient", 
+    x = "", 
+    title = "Reward signal sum"
+  ) + 
+  coord_flip()
+
+ggsave(paste0(img_dir, "lme_sum.png"), width = 5, height = 2.5)
+```
+
+```{r}
+ggplot(lme_avg_df, aes(x = coef_nm, y = fixfx)) + 
+  geom_point() + 
+  geom_errorbar(aes(ymin = ci_lo, ymax = ci_hi), width = 0) + 
+  geom_errorbar(
+    aes(ymin = fixfx - sd, ymax = fixfx + sd), 
+    width = 0,
+    size = 1
+  ) + 
+  theme(
+    panel.border = element_blank(), 
+    panel.grid.minor = element_blank()
+  ) + 
+  geom_hline(yintercept = 0, linetype = "dotted") + 
+  labs(
+    y = "Fixed effect coefficient", 
+    x = "", 
+    title = "Reward signal average"
+  ) + 
+  coord_flip()
+
+ggsave(paste0(img_dir, "lme_avg.png"), width = 5, height = 2.5)
+```
 
 

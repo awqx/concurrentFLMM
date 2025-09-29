@@ -1,0 +1,12 @@
+---
+title: "Figure 4: Simulated CI coverage for variying noise levels"
+author: "Al Xin"
+date: "2025-08-15"
+output: pdf_document
+---
+
+## Overview
+
+## Data
+
+## 
